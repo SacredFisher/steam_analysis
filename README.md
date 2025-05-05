@@ -1,4 +1,4 @@
-#Steam Analytics 
+# Steam Analytics 
 
 ## Overview
 This project creates a comprehensive analytics platform for Steam video games, analyzing the relationship between user sentiment and sales performance. The system collects data from Steam APIs, processes it through AWS services, and presents insights through interactive visualizations.
