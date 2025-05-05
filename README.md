@@ -1,6 +1,4 @@
-# steam_analysis
-DE/DS personal project scraping steam's API's and making some sentiment vs price analyses
-
+#Steam Analytics 
 
 ## Overview
 This project creates a comprehensive analytics platform for Steam video games, analyzing the relationship between user sentiment and sales performance. The system collects data from Steam APIs, processes it through AWS services, and presents insights through interactive visualizations.
