@@ -8,8 +8,10 @@ import json
 import time
 import csv
 import os
+import re
+import random
 from datetime import datetime
-from pathlib import Path
+# from pathlib import Path  # Unused, removed
 
 def get_steamspy_data(appid=None):
     """
@@ -68,10 +70,11 @@ def process_steamspy_data(data):
             owners_min = int(owners_min)
             owners_max = int(owners_max)
             owners_estimate = (owners_min + owners_max) // 2  # Midpoint estimate
-        except:
+        except Exception as e:
             owners_min = 0
             owners_max = 0
             owners_estimate = 0
+            raise e
         
         # Parse tags into a dictionary with scores
         tags = {}
@@ -111,139 +114,185 @@ def process_steamspy_data(data):
     
     return processed_data
 
-def save_to_csv(data, filename="steam_games_data.csv"):
+def save_to_csv(data, filename="steam_games_data.csv", append=False, deduplicate_on="appid", debug=False):
     """
-    Save processed data to CSV file.
-    
+    Save processed data to CSV file, with optional append and deduplication.
     Args:
         data (list): List of dictionaries containing game data
         filename (str): Name of the output CSV file
+        append (bool): If True, append to existing file
+        deduplicate_on (str): Field to deduplicate on (e.g., 'appid')
+        debug (bool): If True, print debug logs
     """
     if not data:
-        print("No data to save")
+        if debug:
+            print("No data to save")
         return
-        
     output_dir = "steam_data"
     os.makedirs(output_dir, exist_ok=True)
     filepath = os.path.join(output_dir, filename)
-    
-    fieldnames = data[0].keys()
-    
-    with open(filepath, 'w', newline='', encoding='utf-8') as csvfile:
+    fieldnames = list(data[0].keys())
+    existing_data = []
+    if append and os.path.exists(filepath):
+        with open(filepath, 'r', newline='', encoding='utf-8') as csvfile:
+            reader = csv.DictReader(csvfile)
+            for row in reader:
+                existing_data.append(row)
+    # Combine and deduplicate
+    all_data = existing_data + data
+    seen = set()
+    deduped_data = []
+    for row in all_data:
+        key = row[deduplicate_on]
+        if key not in seen:
+            deduped_data.append(row)
+            seen.add(key)
+    mode = 'w'
+    with open(filepath, mode, newline='', encoding='utf-8') as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         writer.writeheader()
-        writer.writerows(data)
-    
-    print(f"Data saved to {filepath}")
+        writer.writerows(deduped_data)
+    if debug:
+        print(f"Data saved to {filepath}. Rows: {len(deduped_data)}")
 
-def fetch_top_games(count=100):
+def fetch_and_store_incremental(filename="steam_games_data.csv", debug=False):
     """
-    Fetch data for top games by player count.
-    
+    Fetch latest SteamSpy data and append only new/updated entries to the CSV.
     Args:
-        count (int): Number of top games to fetch
-        
+        filename (str): Name of the output CSV file
+        debug (bool): If True, print debug logs
     Returns:
-        list: Processed data for top games
+        list: The combined dataset after update
     """
-    # First get the list of all games to find top ones by player count
-    print("Fetching list of all games...")
+    data = get_steamspy_data()
+    if data is None:
+        if debug:
+            print("No data fetched from SteamSpy.")
+        return []
+    processed = process_steamspy_data(data)
+    output_dir = "steam_data"
+    os.makedirs(output_dir, exist_ok=True)
+    filepath = os.path.join(output_dir, filename)
+    # Load existing data if present
+    existing_data = []
+    existing_ids = set()
+    if os.path.exists(filepath):
+        with open(filepath, 'r', newline='', encoding='utf-8') as csvfile:
+            reader = csv.DictReader(csvfile)
+            for row in reader:
+                existing_data.append(row)
+                existing_ids.add(row['appid'])
+    # Only keep new/updated entries
+    new_entries = [row for row in processed if row['appid'] not in existing_ids]
+    if debug:
+        print(f"Existing entries: {len(existing_data)}; New entries: {len(new_entries)}")
+    # Save combined data
+    all_data = existing_data + new_entries
+    save_to_csv(all_data, filename=filename, append=False, deduplicate_on='appid', debug=debug)
+    return all_data
+
+
+def calculate_days_on_steam(release_date_str):
+    """
+    Calculate days a game has been on Steam based on release date string.
+    Args:
+        release_date_str: Release date string from SteamSpy
+    Returns:
+        int: Number of days on Steam, or None if unavailable
+    """
+    today = datetime.now()
+    if not release_date_str or release_date_str == 'N/A':
+        return None
+    date_match = re.search(r'(\w+ \d+, \d{4})', release_date_str)
+    if date_match:
+        try:
+            release_date = datetime.strptime(date_match.group(1), '%b %d, %Y')
+            return (today - release_date).days
+        except Exception as e:
+            raise e
+    year_match = re.search(r'(\d{4})', release_date_str)
+    if year_match:
+        try:
+            year = int(year_match.group(1))
+            if 2005 <= year <= today.year:
+                release_date = datetime(year, 7, 1)
+                return (today - release_date).days
+        except Exception as e:
+            raise e
+    if any(x in release_date_str.lower() for x in ['coming', 'soon', 'tba', 'tbd']):
+        return None
+    return None
+
+def sample_games_by_normalized_playtime(total_sample_size=500, num_quantiles=5):
+    """
+    Sample games across spectrum using median playtime normalized by time on Steam.
+    Args:
+        total_sample_size: Total number of games to sample
+        num_quantiles: Number of popularity segments to create
+    Returns:
+        list: List of game information dictionaries
+    """
     all_games = get_steamspy_data()
-    
     if not all_games:
         return []
-    
-    # Sort games by current player count (CCU)
-    sorted_games = sorted(all_games.items(), 
-                          key=lambda x: int(x[1].get('ccu', 0)), 
-                          reverse=True)
-    
-    # Take top N games
-    top_games = sorted_games[:count]
-    
-    # Now fetch detailed data for each top game
-    processed_games = []
-    for i, (appid, _) in enumerate(top_games):
-        print(f"Fetching data for game {i+1}/{count} (AppID: {appid})...")
-        game_data = get_steamspy_data(appid)
-        
-        if game_data:
-            processed_game = process_steamspy_data({appid: game_data})
-            if processed_game:
-                processed_games.extend(processed_game)
-        
-        # Sleep to avoid hitting rate limits
-        time.sleep(1)
-    
-    return processed_games
-
-def fetch_and_store_incremental(store_path="steam_data/last_update.json"):
-    """
-    Store timestamp of last update and only fetch newer data next time
-    
-    Args:
-        store_path (str): Path to store the last update timestamp
-        
-    Returns:
-        list: List of dictionaries containing game data
-    """
-    # Load last update time
-    last_update = datetime.now()
-    if os.path.exists(store_path):
-        with open(store_path, 'r') as f:
-            try:
-                data = json.load(f)
-                last_update = datetime.fromisoformat(data.get('last_update', datetime.now().isoformat()))
-            except:
-                pass
-    
-    # Fetch new data
-    print(f"Last update was at {last_update}")
-    print("Fetching new game data...")
-    data = fetch_top_games(100)  # Fetch top 100 games
-    
-    # Store current time as last update
-    os.makedirs(os.path.dirname(store_path), exist_ok=True)
-    with open(store_path, 'w') as f:
-        json.dump({'last_update': datetime.now().isoformat()}, f)
-    
-    return data
+    games_list = []
+    for appid, data in all_games.items():
+        if data.get('type', '') not in ['game', '', 'dlc']:
+            continue
+        median_playtime = int(data.get('median_forever', 0))
+        release_date_str = data.get('release_date', '')
+        days_on_steam = calculate_days_on_steam(release_date_str)
+        if median_playtime > 0 and days_on_steam and days_on_steam > 0:
+            normalized_playtime = median_playtime / days_on_steam
+            games_list.append({
+                'appid': appid,
+                'name': data.get('name', ''),
+                'median_playtime': median_playtime,
+                'days_on_steam': days_on_steam,
+                'normalized_playtime': normalized_playtime,
+                'is_free': (int(data.get('price', 0)) == 0),
+                'release_date': release_date_str
+            })
+    if not games_list:
+        print("No games with valid playtime and release date found.")
+        return []
+    sorted_games = sorted(games_list, key=lambda x: x['normalized_playtime'], reverse=True)
+    quantile_size = max(1, len(sorted_games) // num_quantiles)
+    sampled_games = []
+    for i in range(num_quantiles):
+        start_idx = i * quantile_size
+        end_idx = (i + 1) * quantile_size if i < num_quantiles - 1 else len(sorted_games)
+        quantile_games = sorted_games[start_idx:end_idx]
+        if not quantile_games:
+            continue
+        sample_count = total_sample_size // num_quantiles
+        if len(quantile_games) < sample_count:
+            sample = quantile_games
+        else:
+            sample = random.sample(quantile_games, sample_count)
+        sampled_games.extend(sample)
+    print(f"Sampled {len(sampled_games)} games across {num_quantiles} quantiles by normalized playtime")
+    # Fetch full details for each sampled game
+    detailed_games = []
+    for idx, game in enumerate(sampled_games):
+        appid = game['appid']
+        print(f"Fetching details for sampled game {idx+1}/{len(sampled_games)} (AppID: {appid})...")
+        detailed = get_steamspy_data(appid)
+        if detailed:
+            processed = process_steamspy_data({appid: detailed})
+            if processed:
+                detailed_games.extend(processed)
+        time.sleep(1)  # Respect SteamSpy API rate limit
+    return detailed_games
 
 def main():
-    print("Steam Game Data Collector")
-    print("------------------------")
-    print("1. Fetch all games (slow)")
-    print("2. Fetch top 100 games by player count")
-    print("3. Fetch specific game by AppID")
-    
-    choice = input("Enter your choice (1-3): ")
-    
-    if choice == '1':
-        print("Fetching data for all games...")
-        data = get_steamspy_data()
-        if data:
-            processed_data = process_steamspy_data(data)
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            save_to_csv(processed_data, f"steam_all_games_{timestamp}.csv")
-    
-    elif choice == '2':
-        num_games = int(input("Enter number of top games to fetch: "))
-        processed_data = fetch_top_games(num_games)
-        if processed_data:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            save_to_csv(processed_data, f"steam_top_{num_games}_games_{timestamp}.csv")
-    
-    elif choice == '3':
-        appid = input("Enter AppID: ")
-        print(f"Fetching data for game with AppID {appid}...")
-        data = get_steamspy_data(appid)
-        if data:
-            processed_data = process_steamspy_data({appid: data})
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            save_to_csv(processed_data, f"steam_game_{appid}_{timestamp}.csv")
-    
-    else:
-        print("Invalid choice")
+    """
+    Main entry: Sample 500 games by normalized playtime and save to CSV.
+    """
+    print("Sampling 500 games by normalized playtime...")
+    sampled_games_data = sample_games_by_normalized_playtime(total_sample_size=500, num_quantiles=5)
+    save_to_csv(sampled_games_data, filename="steam_games_sampled_norm_playtime.csv")
+    print("Done.")
 
 if __name__ == "__main__":
     main()

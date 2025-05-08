@@ -24,66 +24,70 @@ logging.basicConfig(
 )
 logger = logging.getLogger('steam_updater')
 
-def cleanup_old_data(years_to_keep=5):
+def cleanup_old_data(years_to_keep=5, debug=False):
     """
     Remove data files older than specified years
     
     Args:
         years_to_keep (int): Number of years of data to keep
+        debug (bool): If True, print debug logs
     """
     logger.info(f"Cleaning up data older than {years_to_keep} years")
     cutoff_date = datetime.now() - timedelta(days=365 * years_to_keep)
-    
-    # Clean up game data files
+    # Clean up game data files (only timestamped, not the main CSV)
     game_files = glob.glob("steam_data/steam_games_*.csv")
     for file_path in game_files:
         try:
-            # Extract date from filename (format: steam_games_YYYYMMDD_HHMMSS.csv)
             filename = os.path.basename(file_path)
-            date_str = filename.split('_')[2:4]  # Get YYYYMMDD and HHMMSS parts
-            file_date = datetime.strptime(f"{date_str[0]}_{date_str[1].split('.')[0]}", "%Y%m%d_%H%M%S")
-            
-            if file_date < cutoff_date:
-                os.remove(file_path)
-                logger.info(f"Removed old game data file: {filename}")
+            # Only remove files with timestamp in filename
+            parts = filename.split('_')
+            if len(parts) >= 4 and parts[2].isdigit():
+                date_str = parts[2:4]  # Get YYYYMMDD and HHMMSS parts
+                file_date = datetime.strptime(f"{date_str[0]}_{date_str[1].split('.')[0]}", "%Y%m%d_%H%M%S")
+                if file_date < cutoff_date:
+                    os.remove(file_path)
+                    logger.info(f"Removed old game data file: {filename}")
+                    if debug:
+                        logger.debug(f"Removed old game data file: {filename}")
         except Exception as e:
             logger.error(f"Error processing file {file_path}: {e}")
-    
     # Clean up review files
-    review_dirs = glob.glob("steam_data/*_*")  # Pattern matches appid_game_name directories
+    review_dirs = [d for d in glob.glob("steam_data/*_*") if os.path.isdir(d)]
     for review_dir in review_dirs:
         try:
             review_files = glob.glob(os.path.join(review_dir, "*.csv"))
             for file_path in review_files:
                 filename = os.path.basename(file_path)
-                # Extract date from filename (format: appid_name_reviews_YYYYMMDD_HHMMSS.csv)
                 date_parts = filename.split('_')[-2:]  # Get last two parts
-                file_date = datetime.strptime(f"{date_parts[0]}_{date_parts[1].split('.')[0]}", "%Y%m%d_%H%M%S")
-                
-                if file_date < cutoff_date:
-                    os.remove(file_path)
-                    logger.info(f"Removed old review file: {filename}")
-            
+                try:
+                    file_date = datetime.strptime(f"{date_parts[0]}_{date_parts[1].split('.')[0]}", "%Y%m%d_%H%M%S")
+                    if file_date < cutoff_date:
+                        os.remove(file_path)
+                        logger.info(f"Removed old review file: {filename}")
+                        if debug:
+                            logger.debug(f"Removed old review file: {filename}")
+                except Exception:
+                    continue
             # Remove empty directories
             if not os.listdir(review_dir):
                 os.rmdir(review_dir)
                 logger.info(f"Removed empty directory: {review_dir}")
+                if debug:
+                    logger.debug(f"Removed empty directory: {review_dir}")
         except Exception as e:
             logger.error(f"Error processing directory {review_dir}: {e}")
 
-def update_game_data():
+def update_game_data(debug=False):
     """Update game ownership and metadata"""
     logger.info("Starting game data update")
     try:
-        # Get top 100 games using incremental update
-        data = steam_game_data.fetch_and_store_incremental()
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        steam_game_data.save_to_csv(data, f"steam_games_{timestamp}.csv")
+        data = steam_game_data.fetch_and_store_incremental(debug=debug)
         logger.info(f"Successfully updated data for {len(data)} games")
+        if debug:
+            logger.debug(f"Updated data for {len(data)} games")
         return data
     except Exception as e:
         logger.error(f"Error updating game data: {e}")
-        return []
 
 def update_reviews(games, years_back=5):
     """Update reviews for provided games"""
