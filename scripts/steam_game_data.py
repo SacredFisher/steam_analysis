@@ -13,12 +13,14 @@ import random
 from datetime import datetime
 # from pathlib import Path  # Unused, removed
 
-def get_steamspy_data(appid=None):
+def get_steamspy_data(appid=None, max_retries=5, retry_delay=100):
     """
     Fetch game data from SteamSpy API.
     
     Args:
         appid (str, optional): Specific app ID to fetch. If None, fetches all games.
+        max_retries (int): Maximum number of retries for failed requests
+        retry_delay (int): Delay in seconds between retries
         
     Returns:
         dict: JSON response from SteamSpy API
@@ -30,21 +32,104 @@ def get_steamspy_data(appid=None):
             'request': 'appdetails',
             'appid': appid
         }
-    else:
-        params = {
-            'request': 'all',  # Get all games
-        }
-    
-    try:
-        response = requests.get(base_url, params=params)
-        if response.status_code == 200:
-            return response.json()
-        else:
-            print(f"Error: Received status code {response.status_code}")
-            return None
-    except Exception as e:
-        print(f"Error fetching data from SteamSpy: {e}")
+        for attempt in range(max_retries):
+            try:
+                response = requests.get(base_url, params=params)
+                if response.status_code == 200:
+                    return response.json()
+                elif response.status_code == 500:
+                    print(f"Server error (500) on attempt {attempt + 1}/{max_retries}. Retrying in {retry_delay} seconds...")
+                    time.sleep(retry_delay)
+                    continue
+                else:
+                    print(f"Error: Received status code {response.status_code}")
+                    return None
+            except Exception as e:
+                print(f"Error fetching data from SteamSpy: {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+                continue
         return None
+    else:
+        # Fetch all games with pagination
+        all_games = {}
+        progress_file = "steam_data/fetch_progress.json"
+        os.makedirs("steam_data", exist_ok=True)
+        
+        # Load progress if exists
+        if os.path.exists(progress_file):
+            try:
+                with open(progress_file, 'r') as f:
+                    progress = json.load(f)
+                    page = progress.get('last_page', 0) + 1  # Start from next page
+                    all_games = progress.get('games', {})
+                    print(f"Resuming from page {page} with {len(all_games)} games already fetched")
+            except Exception as e:
+                print(f"Error loading progress: {e}")
+                page = 0
+        else:
+            page = 0
+        
+        while True:
+            for attempt in range(max_retries):
+                try:
+                    # Add 60 second delay between requests as per API requirements
+                    if page > 0:
+                        time.sleep(60)
+                        
+                    params = {
+                        'request': 'all',
+                        'page': page
+                    }
+                    
+                    print(f"Fetching page {page}...")
+                    response = requests.get(base_url, params=params)
+                    
+                    if response.status_code == 200:
+                        games = response.json()
+                        
+                        # If we get an empty response or no games, we've reached the end
+                        if not games:
+                            return all_games
+                            
+                        # Add games from this page to our collection
+                        all_games.update(games)
+                        print(f"Got {len(games)} games from page {page}")
+                        
+                        # Save progress after each successful page
+                        try:
+                            with open(progress_file, 'w') as f:
+                                json.dump({
+                                    'last_page': page,
+                                    'games': all_games
+                                }, f)
+                            print(f"Progress saved: page {page}, total games: {len(all_games)}")
+                        except Exception as e:
+                            print(f"Error saving progress: {e}")
+                        
+                        page += 1
+                        break  # Success, move to next page
+                        
+                    elif response.status_code == 500:
+                        print(f"Server error (500) on attempt {attempt + 1}/{max_retries}. Retrying in {retry_delay} seconds...")
+                        time.sleep(retry_delay)
+                        continue
+                    else:
+                        print(f"Error: Received status code {response.status_code}")
+                        return all_games
+                        
+                except Exception as e:
+                    print(f"Error fetching page {page}: {e}")
+                    if attempt < max_retries - 1:
+                        time.sleep(retry_delay)
+                    continue
+            
+            # If we've exhausted all retries for this page, return what we have
+            if attempt == max_retries - 1:
+                print(f"Failed to fetch page {page} after {max_retries} attempts. Returning collected data.")
+                return all_games
+        
+        return all_games
 
 def process_steamspy_data(data):
     """
@@ -59,58 +144,71 @@ def process_steamspy_data(data):
     processed_data = []
     
     for appid, game_data in data.items():
-        # Skip hidden games
-        if appid == '999999':
-            continue
-            
-        # Parse owners range into min and max values
-        owners_range = game_data.get('owners', '0 .. 0')
         try:
-            owners_min, owners_max = owners_range.replace(',', '').split(' .. ')
-            owners_min = int(owners_min)
-            owners_max = int(owners_max)
-            owners_estimate = (owners_min + owners_max) // 2  # Midpoint estimate
+            # Skip hidden games
+            if appid == '999999':
+                continue
+                
+            # Parse owners range into min and max values
+            owners_range = game_data.get('owners', '0 .. 0')
+            try:
+                owners_min, owners_max = owners_range.replace(',', '').split(' .. ')
+                owners_min = int(owners_min)
+                owners_max = int(owners_max)
+                owners_estimate = (owners_min + owners_max) // 2  # Midpoint estimate
+            except (ValueError, AttributeError):
+                owners_min = 0
+                owners_max = 0
+                owners_estimate = 0
+            
+            # Parse tags into a dictionary with scores
+            tags = {}
+            for key, value in game_data.items():
+                if key.startswith('tags'):
+                    tag_name = key[4:]  # Remove 'tags' prefix
+                    if tag_name:
+                        tags[tag_name] = value
+            
+            # Safely convert numeric values with defaults
+            def safe_int(value, default=0):
+                if value is None:
+                    return default
+                try:
+                    return int(value)
+                except (ValueError, TypeError):
+                    return default
+            
+            # Create processed game entry
+            processed_game = {
+                'appid': appid,
+                'name': game_data.get('name', ''),
+                'developer': game_data.get('developer', ''),
+                'publisher': game_data.get('publisher', ''),
+                'owners_min': owners_min,
+                'owners_max': owners_max,
+                'owners_estimate': owners_estimate,
+                'average_playtime_forever': safe_int(game_data.get('average_forever')),
+                'average_playtime_2weeks': safe_int(game_data.get('average_2weeks')),
+                'median_playtime_forever': safe_int(game_data.get('median_forever')),
+                'median_playtime_2weeks': safe_int(game_data.get('median_2weeks')),
+                'ccu': safe_int(game_data.get('ccu')),
+                'price_cents': safe_int(game_data.get('price')),
+                'initial_price_cents': safe_int(game_data.get('initialprice')),
+                'discount_percent': safe_int(game_data.get('discount')),
+                'languages': game_data.get('languages', ''),
+                'genre': game_data.get('genre', ''),
+                'tags': json.dumps(tags),
+                'positive_reviews': safe_int(game_data.get('positive')),
+                'negative_reviews': safe_int(game_data.get('negative')),
+                'revenue_estimate': owners_estimate * safe_int(game_data.get('price')) / 100,  # Convert cents to dollars
+                'collection_timestamp': datetime.now().isoformat()
+            }
+            
+            processed_data.append(processed_game)
+            
         except Exception as e:
-            owners_min = 0
-            owners_max = 0
-            owners_estimate = 0
-            raise e
-        
-        # Parse tags into a dictionary with scores
-        tags = {}
-        for key, value in game_data.items():
-            if key.startswith('tags'):
-                tag_name = key[4:]  # Remove 'tags' prefix
-                if tag_name:
-                    tags[tag_name] = value
-        
-        # Create processed game entry
-        processed_game = {
-            'appid': appid,
-            'name': game_data.get('name', ''),
-            'developer': game_data.get('developer', ''),
-            'publisher': game_data.get('publisher', ''),
-            'owners_min': owners_min,
-            'owners_max': owners_max,
-            'owners_estimate': owners_estimate,
-            'average_playtime_forever': game_data.get('average_forever', 0),
-            'average_playtime_2weeks': game_data.get('average_2weeks', 0),
-            'median_playtime_forever': game_data.get('median_forever', 0),
-            'median_playtime_2weeks': game_data.get('median_2weeks', 0),
-            'ccu': game_data.get('ccu', 0),
-            'price_cents': game_data.get('price', 0),
-            'initial_price_cents': game_data.get('initialprice', 0),
-            'discount_percent': game_data.get('discount', 0),
-            'languages': game_data.get('languages', ''),
-            'genre': game_data.get('genre', ''),
-            'tags': json.dumps(tags),
-            'positive_reviews': game_data.get('positive', 0),
-            'negative_reviews': game_data.get('negative', 0),
-            'revenue_estimate': owners_estimate * int(game_data.get('price', 0)) / 100,  # Convert cents to dollars
-            'collection_timestamp': datetime.now().isoformat()
-        }
-        
-        processed_data.append(processed_game)
+            print(f"Error processing game {appid}: {e}")
+            continue
     
     return processed_data
 
@@ -223,27 +321,43 @@ def calculate_days_on_steam(release_date_str):
         return None
     return None
 
-def sample_games_by_normalized_playtime(total_sample_size=500, num_quantiles=5):
+def sample_games_by_normalized_playtime(games_per_quintile=1000):
     """
     Sample games across spectrum using median playtime normalized by time on Steam.
+    
     Args:
-        total_sample_size: Total number of games to sample
-        num_quantiles: Number of popularity segments to create
+        games_per_quintile: Number of games to sample from each quintile
+        
     Returns:
         list: List of game information dictionaries
     """
+    # Get all games from SteamSpy
     all_games = get_steamspy_data()
     if not all_games:
         return []
+    
+    print(f"Retrieved {len(all_games)} games from SteamSpy API")
+    
+    # Extract games with necessary data
     games_list = []
     for appid, data in all_games.items():
+        # Skip non-game apps
         if data.get('type', '') not in ['game', '', 'dlc']:
             continue
+            
+        # Get median playtime (in minutes)
         median_playtime = int(data.get('median_forever', 0))
+        
+        # Get release date and calculate days on Steam
         release_date_str = data.get('release_date', '')
         days_on_steam = calculate_days_on_steam(release_date_str)
-        if median_playtime > 0 and days_on_steam and days_on_steam > 0:
+        
+        # Only include games with playtime data and valid release dates
+        # Minimum 30 days on Steam to avoid very new games with unreliable data
+        if median_playtime > 0 and days_on_steam and days_on_steam > 30:
+            # Calculate normalized playtime (minutes per day on Steam)
             normalized_playtime = median_playtime / days_on_steam
+            
             games_list.append({
                 'appid': appid,
                 'name': data.get('name', ''),
@@ -253,46 +367,59 @@ def sample_games_by_normalized_playtime(total_sample_size=500, num_quantiles=5):
                 'is_free': (int(data.get('price', 0)) == 0),
                 'release_date': release_date_str
             })
-    if not games_list:
-        print("No games with valid playtime and release date found.")
-        return []
+    
+    print(f"Found {len(games_list)} games with valid playtime and release date data")
+    
+    # Sort by normalized playtime
     sorted_games = sorted(games_list, key=lambda x: x['normalized_playtime'], reverse=True)
-    quantile_size = max(1, len(sorted_games) // num_quantiles)
+    
+    # Determine quintile boundaries
+    total_games = len(sorted_games)
+    quintile_size = total_games // 5
+    
+    # Sample from each quintile
     sampled_games = []
-    for i in range(num_quantiles):
-        start_idx = i * quantile_size
-        end_idx = (i + 1) * quantile_size if i < num_quantiles - 1 else len(sorted_games)
-        quantile_games = sorted_games[start_idx:end_idx]
-        if not quantile_games:
-            continue
-        sample_count = total_sample_size // num_quantiles
-        if len(quantile_games) < sample_count:
-            sample = quantile_games
+    for i in range(5):
+        start_idx = i * quintile_size
+        end_idx = (i + 1) * quintile_size if i < 4 else total_games
+        
+        # Get games in this quintile
+        quintile_games = sorted_games[start_idx:end_idx]
+        
+        # Sample from this quintile
+        if len(quintile_games) <= games_per_quintile:
+            # Take all games if there aren't enough
+            quintile_sample = quintile_games
         else:
-            sample = random.sample(quantile_games, sample_count)
-        sampled_games.extend(sample)
-    print(f"Sampled {len(sampled_games)} games across {num_quantiles} quantiles by normalized playtime")
-    # Fetch full details for each sampled game
-    detailed_games = []
-    for idx, game in enumerate(sampled_games):
-        appid = game['appid']
-        print(f"Fetching details for sampled game {idx+1}/{len(sampled_games)} (AppID: {appid})...")
-        detailed = get_steamspy_data(appid)
-        if detailed:
-            processed = process_steamspy_data({appid: detailed})
-            if processed:
-                detailed_games.extend(processed)
-        time.sleep(1)  # Respect SteamSpy API rate limit
-    return detailed_games
+            # Random sampling without replacement
+            quintile_sample = random.sample(quintile_games, games_per_quintile)
+        
+        # Track quintile number for each game
+        for game in quintile_sample:
+            game['quintile'] = i + 1
+        
+        sampled_games.extend(quintile_sample)
+    
+    # Report on the sampling
+    print(f"Sampled {len(sampled_games)} games across 5 quintiles of normalized playtime")
+    for i in range(5):
+        count = sum(1 for game in sampled_games if game['quintile'] == i + 1)
+        print(f"  Quintile {i+1}: {count} games")
+    
+    return sampled_games
 
 def main():
     """
-    Main entry: Sample 500 games by normalized playtime and save to CSV.
+    Main entry: Fetch all games from SteamSpy and save to CSV.
     """
-    print("Sampling 500 games by normalized playtime...")
-    sampled_games_data = sample_games_by_normalized_playtime(total_sample_size=500, num_quantiles=5)
-    save_to_csv(sampled_games_data, filename="steam_games_sampled_norm_playtime.csv")
-    print("Done.")
+    print("Fetching all games from SteamSpy...")
+    data = get_steamspy_data()
+    if data:
+        processed_data = process_steamspy_data(data)
+        save_to_csv(processed_data, filename="steam_games_data.csv")
+        print(f"Saved data for {len(processed_data)} games")
+    else:
+        print("Failed to fetch game data")
 
 if __name__ == "__main__":
     main()

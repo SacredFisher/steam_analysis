@@ -46,6 +46,7 @@ def get_user_reviews(appid, params):
 def fetch_all_reviews(appid, game_name=None, language='english', time_range=None):
     """
     Fetch all reviews for a game, with optional time range filtering.
+    Limited to 20 pages of reviews.
     
     Args:
         appid (str): Steam AppID of the game
@@ -84,10 +85,11 @@ def fetch_all_reviews(appid, game_name=None, language='english', time_range=None
     # List to store collected reviews
     selected_reviews = []
     page_count = 0
+    max_pages = 20  # Limit to 20 pages
     
     print(f"Fetching reviews for {game_name} (AppID: {appid})...")
     
-    while True:
+    while page_count < max_pages:  # Add page limit check
         # Fetch reviews for current page
         reviews_response = get_user_reviews(appid, params)
         page_count += 1
@@ -204,7 +206,7 @@ def save_reviews_to_pickle(reviews, appid, game_name=None, time_range=None):
 
 def save_reviews_to_csv(reviews, appid, game_name=None, time_range=None):
     """
-    Save collected reviews to a CSV file.
+    Save collected reviews to a CSV file in a standardized format for database import.
     
     Args:
         reviews (list): List of review dictionaries
@@ -219,27 +221,45 @@ def save_reviews_to_csv(reviews, appid, game_name=None, time_range=None):
     if not game_name:
         game_name = f"App{appid}"
     
-    # Clean game name for filename
-    clean_name = ''.join(c if c.isalnum() else '_' for c in game_name)
-    
-    # Create folder structure
-    folder_name = f"{appid}_{clean_name}"
-    output_dir = Path("steam_data", folder_name)
+    # Create reviews directory if it doesn't exist
+    output_dir = Path("steam_data/reviews")
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    # Create filename with time range if specified
-    if time_range:
-        start_time, end_time = time_range
-        filename = f"{appid}_{clean_name}_reviews_{start_time.strftime('%Y%m%d')}_{end_time.strftime('%Y%m%d')}.csv"
-    else:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"{appid}_{clean_name}_reviews_{timestamp}.csv"
+    # Create filename with timestamp
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"reviews_{appid}_{timestamp}.csv"
     
     # Prepare CSV file
     output_path = output_dir / filename
     
-    # Get fieldnames from the first review
-    fieldnames = reviews[0].keys()
+    # Add game_id to each review for easy joining
+    for review in reviews:
+        review['game_id'] = appid
+        review['game_name'] = game_name
+        review['collection_timestamp'] = datetime.now().isoformat()
+    
+    # Define fieldnames in a specific order for consistency
+    fieldnames = [
+        'game_id',           # For joining with game data
+        'game_name',         # For reference
+        'recommendationid',  # Unique review ID
+        'author_steamid',    # Reviewer ID
+        'playtime_at_review_minutes',
+        'playtime_forever_minutes',
+        'playtime_last_two_weeks_minutes',
+        'last_played',
+        'review_text',
+        'timestamp_created',
+        'timestamp_updated',
+        'voted_up',
+        'votes_up',
+        'votes_funny',
+        'weighted_vote_score',
+        'steam_purchase',
+        'received_for_free',
+        'written_during_early_access',
+        'collection_timestamp'  # When we collected this review
+    ]
     
     # Write to CSV
     with open(output_path, 'w', newline='', encoding='utf-8') as csvfile:
@@ -247,7 +267,7 @@ def save_reviews_to_csv(reviews, appid, game_name=None, time_range=None):
         writer.writeheader()
         writer.writerows(reviews)
     
-    print(f"Reviews saved to {output_path}")
+    print(f"Saved {len(reviews)} reviews to {output_path}")
 
 def fetch_recent_reviews(appid, game_name=None, language='english', years_back=5):
     """
