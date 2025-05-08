@@ -71,6 +71,7 @@ def get_steamspy_data(appid=None, max_retries=5, retry_delay=100):
             page = 0
         
         while True:
+            page_success = False
             for attempt in range(max_retries):
                 try:
                     # Add 60 second delay between requests as per API requirements
@@ -90,6 +91,7 @@ def get_steamspy_data(appid=None, max_retries=5, retry_delay=100):
                         
                         # If we get an empty response or no games, we've reached the end
                         if not games:
+                            print("Reached end of data")
                             return all_games
                             
                         # Add games from this page to our collection
@@ -108,6 +110,7 @@ def get_steamspy_data(appid=None, max_retries=5, retry_delay=100):
                             print(f"Error saving progress: {e}")
                         
                         page += 1
+                        page_success = True
                         break  # Success, move to next page
                         
                     elif response.status_code == 500:
@@ -124,12 +127,11 @@ def get_steamspy_data(appid=None, max_retries=5, retry_delay=100):
                         time.sleep(retry_delay)
                     continue
             
-            # If we've exhausted all retries for this page, return what we have
-            if attempt == max_retries - 1:
-                print(f"Failed to fetch page {page} after {max_retries} attempts. Returning collected data.")
-                return all_games
-        
-        return all_games
+            # If we've exhausted all retries for this page, move to next page
+            if not page_success:
+                print(f"Failed to fetch page {page} after {max_retries} attempts. Moving to next page.")
+                page += 1
+                continue
 
 def process_steamspy_data(data):
     """
